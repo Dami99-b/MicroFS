@@ -268,8 +268,12 @@ Status FaultInjectingEnv::RenameFile(const std::string& from,
 Status FaultInjectingEnv::RemoveFile(const std::string& path) {
   Status status = MaybeFail();
   if (!status.ok()) return status;
-  pending_.erase(path);
-  return base_->RemoveFile(path);
+  const bool was_pending = pending_.erase(path) != 0;
+  status = base_->RemoveFile(path);
+  if (was_pending && status.code() == StatusCode::kNotFound) {
+    return Status::OK();
+  }
+  return status;
 }
 
 Status FaultInjectingEnv::FileExists(const std::string& path, bool* exists) {

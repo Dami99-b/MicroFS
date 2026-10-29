@@ -29,3 +29,17 @@ unmeasured performance.
   dispatch will only be added if it can be safely verified on the build host.
 - Histogram quantiles use logarithmic buckets with 256 sub-buckets per power
   of two; results are upper bounds, not exact order statistics.
+
+## Phase 2
+
+- The skiplist has a fixed maximum height of 12, deterministic writer-only
+  xorshift height selection, and immutable arena-copied key/value bytes.
+- Internal keys append an eight-byte little-endian `(sequence << 8) | type`
+  tag. The comparator orders user keys ascending, sequences descending, and
+  value types ascending.
+- WAL checksums cover the record-type byte and payload. Recovery stops at the
+  first invalid physical record, retains only complete logical records, and
+  synchronously truncates the invalid suffix.
+- Group commit combines concurrently queued records into one append and one
+  required sync per processing batch. Batching depends on scheduling and is
+  not guaranteed for every concurrent run.

@@ -27,6 +27,7 @@ $env:PATH = (Split-Path $compiler.Source) + ';' + $env:PATH
 & $compiler.Source -std=c++20 -O2 -Wall -Wextra -Wpedantic `
   -I (Join-Path $PSScriptRoot '..\include') `
   (Join-Path $PSScriptRoot '..\src\env.cc') `
+  (Join-Path $PSScriptRoot '..\src\wal.cc') `
   (Join-Path $PSScriptRoot '..\tests\core_test.cc') `
   -o $executable
 if ($LASTEXITCODE -ne 0) {

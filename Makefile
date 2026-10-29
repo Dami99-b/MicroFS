@@ -1,8 +1,8 @@
 CXX ?= g++
-CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -pthread
 CPPFLAGS ?= -Iinclude
 BUILD_DIR ?= build
-SOURCES = src/env.cc tests/core_test.cc
+SOURCES = src/env.cc src/wal.cc tests/core_test.cc
 
 .PHONY: all build test clean
 

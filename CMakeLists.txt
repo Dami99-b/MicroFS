@@ -3,12 +3,16 @@ project(MicroFS VERSION 0.1.0 LANGUAGES CXX)
 
 option(MICROFS_BUILD_TESTS "Build MicroFS tests" ON)
 
+find_package(Threads REQUIRED)
+
 add_library(microfs
   src/env.cc
+  src/wal.cc
 )
 add_library(microfs::microfs ALIAS microfs)
 target_include_directories(microfs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(microfs PUBLIC cxx_std_20)
+target_link_libraries(microfs PUBLIC Threads::Threads)
 
 if(MSVC)
   target_compile_options(microfs PRIVATE /W4 /permissive-)
