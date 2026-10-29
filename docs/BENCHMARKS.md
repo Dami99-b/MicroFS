@@ -13,6 +13,16 @@ measurements, including every repetition and latency percentile, are in
 and the matching CSV. Environment details are in the adjacent
 [`environment.json`](../bench/results/windows-gcc-2026-10-29/environment.json).
 
+| Workload | Median ops/s | Median p50 latency | Median p99 latency |
+|---|---:|---:|---:|
+| `fillrandom` | 1855.50809619 | 359423 ns | 3538943 ns |
+| `readrandom-hit` | 293887.723134 | 2207 ns | 7215 ns |
+
+The recorded environment was Windows 11 Pro (10.0.22621), Intel Core i5-4300U
+at 1.90 GHz, 4 logical processors, 8249847808 bytes RAM, MSYS2 GCC 16.2.0,
+`-std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror`. Physical storage type was
+not queried. The raw environment file is authoritative.
+
 This is not a storage-engine comparison or a durability result. The benchmark
 sets WAL sync policy to `never`, keeps the measured key set in the memtable,
 and does not time the final close/flush. Its throughput must not be presented
@@ -28,6 +38,7 @@ python scripts\plot_benchmarks.py bench\results\windows-gcc-2026-10-29\results.j
 ```
 
 The chart generator uses only matplotlib. Chart generation was not verified
-on this host because matplotlib is not installed. Do not treat repeated runs
 on another host or build as directly comparable without recording its
 environment and commit.
+
+![Median random-write and random-hit-read throughput](img/microfs-bench.png)

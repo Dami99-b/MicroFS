@@ -2,7 +2,7 @@
 
 ## Platform and scope
 
-The implementation is being developed and verified on Windows 10 with MSYS2
+The implementation is being developed and verified on Windows 11 with MSYS2
 GCC 16.2.0. CMake, Ninja, MSVC, Clang, and a configured Rust toolchain are not
 available in this environment. The initial storage environment uses the C++
 standard filesystem and C runtime, with a platform-conditional durable-sync
