@@ -1,0 +1,11 @@
+﻿{
+    "cpu":  "Intel(R) Core(TM) i5-4300U CPU @ 1.90GHz",
+    "logical_processors":  4,
+    "physical_memory_bytes":  8249847808,
+    "os":  "Microsoft Windows 11 Pro",
+    "os_version":  "10.0.22621",
+    "compiler":  "g++.exe (Rev3, Built by MSYS2 project) 16.2.0",
+    "flags":  "-std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror",
+    "storage":  "Workspace volume; physical media type not queried",
+    "git_commit":  "3561468cebcc7238828fa34499abbb6696cd1c42"
+}
