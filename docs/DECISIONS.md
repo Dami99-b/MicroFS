@@ -34,9 +34,10 @@ unmeasured performance.
 
 - The skiplist has a fixed maximum height of 12, deterministic writer-only
   xorshift height selection, and immutable arena-copied key/value bytes.
-- Internal keys append an eight-byte little-endian `(sequence << 8) | type`
-  tag. The comparator orders user keys ascending, sequences descending, and
-  value types ascending.
+- The memtable initially used the phase-2 little-endian internal-key layout.
+  Phase 4 replaces it with an escaped user key terminator and a big-endian
+  inverted sequence/type tag, allowing bytewise ordering in SSTables to match
+  user-key ascending and sequence descending even with binary keys.
 - WAL checksums cover the record-type byte and payload. Recovery stops at the
   first invalid physical record, retains only complete logical records, and
   synchronously truncates the invalid suffix.
@@ -55,3 +56,18 @@ unmeasured performance.
 - The table reader currently loads the whole table through Env rather than
   using mmap or pread. This portable implementation is not represented as a
   zero-copy or memory-mapped reader.
+
+## Phase 4
+
+- The first DB version keeps one WAL for the lifetime of the database and
+  records complete version edits in a checksummed manifest. On recovery, WAL
+  operations at or below the manifest's durable sequence are skipped.
+- Iterators materialize the visible key/value set at creation. They provide
+  stable snapshot traversal but use memory proportional to the visible data.
+- Compaction currently merges all installed tables into one level-1 table
+  rather than selecting bounded level ranges. It drops obsolete versions
+  only after considering the oldest active snapshot; it is not a production
+  leveled-compaction scheduler.
+- The database oracle test currently runs 10,000 randomized API operations.
+  The one-million-operation target, randomized crash-point matrix, and
+  concurrent snapshot/compaction stress remain outstanding.

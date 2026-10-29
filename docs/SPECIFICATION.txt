@@ -1,0 +1,71 @@
+ROLE AND MODE
+You are a principal systems engineer building a portfolio-grade project end to end in this repository. Work autonomously: write the files yourself, build, run tests, fix failures, and continue without asking me questions. Work in the phases listed at the bottom. After each phase, build from scratch, run all tests, commit with a clear message, and only then move on. If something is ambiguous, choose the standard LevelDB/RocksDB behaviour and record the decision in docs/DECISIONS.md.
+
+OBJECTIVE
+Build MicroFS: an embedded LSM-tree key-value storage engine in C++20, plus TickStore, a small time-series layer on top for market tick data. It will be used on a resume for systems and infrastructure internships (Bloomberg, FAANG, trading firms), so it must be correct, well tested, honestly measured and easy for an interviewer to read and verify.
+
+HARD RULES
+- C++20, CMake 3.20+, Ninja. Standard library and POSIX only. No Boost, no third-party code in the core. Everything lives in namespace microfs.
+- Must build warning-free with -Wall -Wextra -Wpedantic on GCC and Clang, on Linux and macOS. Do not use -march=native. CPU-specific code (CRC32C hardware instructions, optional SIMD) is selected at compile time or runtime with a portable fallback.
+- Complete working code only. No TODOs, stubs or placeholders.
+- Honesty: never describe something as lock-free, SIMD, zero-copy, or fast unless the code and a measurement show it. Every number in any document must come from a benchmark run on this machine, produced by a script, with the raw output committed. Never invent or round up figures.
+- Comments only where a memory-ordering choice or an on-disk invariant would otherwise be unclear.
+- Errors use a Status type. No exceptions across the public API.
+- Clean under AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer.
+
+ENGINE SPEC
+1. Memtable: arena-backed skiplist ordered by internal key (user key ascending, sequence descending, type). One serialized writer, lock-free readers using acquire/release atomics. Sequence numbers give snapshot reads. Deletes are tombstones. Memtable size limit is configurable.
+2. WAL: 32 KB blocks with fragmented records (full, first, middle, last), each with a CRC32C. CRC32C uses ARMv8 CRC instructions or SSE4.2 when available, with a table-driven software fallback chosen safely at runtime. Sync policy is configurable: every write, every N bytes, or never. Recovery replays until the first corrupt or torn record and truncates the tail. Group commit: concurrent writers are batched behind a leader so one fsync covers many writes.
+3. SSTable: 4 KB data blocks (configurable) with prefix compression and restart points, a CRC32C trailer per block, an index block, a filter block, and a fixed footer with a magic number and block handles. Tables are read with mmap, with a pread fallback. A sharded LRU block cache sits in front of data blocks, with hit and miss counters.
+4. Bloom filter: MurmurHash3-based double hashing, configurable bits per key (default 10). A prefix filter option lets TickStore skip tables by symbol. Any vectorized probe path must live behind a feature macro with a scalar fallback, and is kept only if the benchmark shows it helps.
+5. Versions: MANIFEST log of version edits plus a CURRENT file, updated atomically with write-temp, fsync and rename. Files are tracked per level with smallest and largest keys.
+6. Compaction: immutable memtable flushed to L0, then leveled compaction using a k-way merging iterator. Tombstones and shadowed versions are dropped only when no deeper level can contain the key. One background thread, write slowdown and stop thresholds on L0 file count, and snapshot-aware garbage collection.
+7. Public API: Open, Close, Put, Get, Delete, Write(WriteBatch), NewIterator (Seek, SeekToFirst, Seek to last, Next, Prev, Valid, key, value), GetSnapshot, ReleaseSnapshot, GetProperty or stats. A LOCK file stops two processes opening one directory. Options struct for every tunable.
+8. Env abstraction: a file-system interface used by everything, with a POSIX implementation and a fault-injecting implementation for tests.
+
+TICKSTORE LAYER
+- Key encoding: symbol, then big-endian 64-bit nanosecond timestamp, so range scans return one symbol's ticks in time order.
+- Value encoding: price (fixed-point integer) and size, with delta and varint encoding of consecutive ticks inside batched records to cut space. Measure the space saving honestly.
+- API: AppendTick, AppendBatch, QueryRange(symbol, t0, t1), LastTick(symbol), and a multi-symbol scan.
+- A synthetic but realistic tick generator: many symbols, skewed activity, bursty timestamps, random-walk prices, fixed seed.
+
+CORRECTNESS TESTING
+- A tiny header-only test harness, no external frameworks. CTest registers every test.
+- Unit tests for every component: coding, CRC32C known vectors, skiplist (including concurrent readers during writes), memtable, WAL, block, bloom filter (false positive rate stays under 2 percent at 10 bits per key), table, version edits, compaction.
+- Corruption tests: flipped bits and truncated files are detected, never crash.
+- Crash-consistency tests using the fault-injecting Env: drop unsynced data, tear the last write at random offsets, and crash during flush, compaction and MANIFEST update. After reopen, every acknowledged synced write must be present and no corrupt state may be observed. Run thousands of randomized crash points with fixed seeds.
+- Oracle test: at least 1 million random put, delete, get, scan and snapshot operations compared against std::map, with several close and reopen cycles.
+- Concurrency tests run under ThreadSanitizer: multiple readers with a writer, snapshots during compaction.
+- Fuzz targets (libFuzzer, built only when the compiler supports it) for the block parser, the WAL reader, the table opener and the batch decoder. Commit a small seed corpus.
+
+BENCHMARKS AND METRICS
+Build a reproducible benchmark tool (bench/microfs_bench) with fixed seeds that outputs both a readable table and machine-readable JSON and CSV.
+Workloads: fillseq, fillrandom, overwrite, readrandom (hit and miss), readseq, range scan of N keys, mixed read/write at 50/50 and 95/5, multi-threaded reads at 1, 2, 4, 8 threads, WAL sync modes (every write, batched, none), group commit with 1 to 16 writer threads, and the TickStore workload (ingest N million ticks, then range queries, last-tick lookups and multi-symbol scans).
+Metrics to report for each run: operations per second, MB per second, latency p50, p90, p99, p99.9 and max (use a self-written HDR-style histogram, not averages), write amplification, read amplification, space amplification, bloom filter probes, filter-saved disk reads and false positive rate, block cache hit rate, compaction bytes read and written, write stall time, WAL fsync count, and TickStore compression ratio.
+Experiments to run and chart: bloom filter on versus off for missing-key reads; block cache size sweep; block size sweep; memtable size sweep; bits-per-key versus false positive rate; sync policy versus throughput and p99 latency; reader thread scaling; with and without prefix filter for TickStore.
+If LevelDB or RocksDB is installed on this machine, add an optional comparison harness behind a CMake option that runs the same workloads on the same data directory type, and report the results fairly, including where MicroFS loses. Never fake or skip this comparison to look better.
+Capture the environment with every result set: CPU model, core count, RAM, OS, compiler and version, build flags, storage type, and git commit. Warm up, repeat each run at least 5 times, and report median and spread.
+Write a Python script (matplotlib only) that turns the JSON results into PNG charts saved in docs/img and referenced from the docs.
+Profile the hottest paths with perf or the platform equivalent, fix the real bottlenecks you find, and record each optimization with the before and after numbers in docs/PERFORMANCE_LOG.md.
+
+TOOLING
+- clang-format and clang-tidy configs. GitHub Actions workflow: build matrix (GCC and Clang, Debug and Release), run tests, run ASan/UBSan and TSan jobs, a short fuzz smoke run, and a quick benchmark smoke run.
+- A Makefile or scripts for common tasks: build, test, sanitize, fuzz, bench, charts.
+- A minimal CLI (tools/microfs_cli): put, get, del, scan, stats, and tick commands.
+
+DOCUMENTATION
+- README.md: what it is, why it matters, a diagram of the write and read paths, quick start, a usage example, the headline results table with real measured numbers and a link to raw data, a short honest limitations section, and how to reproduce every result.
+- docs/ARCHITECTURE.md, docs/FORMAT.md (every on-disk layout with byte offsets), docs/BENCHMARKS.md (method, environment, results, charts, analysis), docs/DECISIONS.md (design choices and trade-offs versus LevelDB and RocksDB), docs/PERFORMANCE_LOG.md, docs/TESTING.md.
+- docs/RESUME.md: five resume bullet points and a one-paragraph project summary written only from real measured results in this repo, each bullet with the exact number and the benchmark file that proves it, plus ten likely interview questions about the design with strong honest answers.
+
+PHASES (each ends with a full clean build, all tests passing, and a commit)
+1. Scaffold, CMake, test harness, Status, Env (POSIX plus fault-injecting), coding, CRC32C, hash, arena, histogram.
+2. Skiplist, memtable, WAL with group commit and recovery, plus tests.
+3. Blocks, bloom and prefix filter, table builder and reader, block cache, plus tests and corruption tests.
+4. Version set, MANIFEST, compaction, DB, snapshots, iterators, recovery, plus tests, the oracle test and crash-consistency tests.
+5. TickStore, CLI, fuzz targets, CI, sanitizer runs.
+6. Benchmark tool, experiments, charts, profiling and optimization.
+7. Documentation, RESUME.md, final clean-room verification: fresh clone, full build, all tests, sanitizers, and a rerun of the headline benchmark to confirm the published numbers.
+
+DEFINITION OF DONE
+Fresh clone builds with one command; every test passes under ASan, UBSan and TSan; the crash-consistency suite passes; every figure in the docs traces to a committed raw result file; the README results table matches a rerun within normal variance; and the final reply lists what was built, the headline measured numbers, any known weaknesses, and anything you could not verify.

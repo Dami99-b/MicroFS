@@ -9,8 +9,10 @@ add_library(microfs
   src/block.cc
   src/block_cache.cc
   src/bloom_filter.cc
+  src/db.cc
   src/env.cc
   src/table.cc
+  src/version_set.cc
   src/wal.cc
 )
 add_library(microfs::microfs ALIAS microfs)
@@ -21,7 +23,7 @@ target_link_libraries(microfs PUBLIC Threads::Threads)
 if(MSVC)
   target_compile_options(microfs PRIVATE /W4 /permissive-)
 else()
-  target_compile_options(microfs PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(microfs PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
 if(MICROFS_BUILD_TESTS)
@@ -29,7 +31,9 @@ if(MICROFS_BUILD_TESTS)
   add_executable(microfs_core_tests tests/core_test.cc)
   target_link_libraries(microfs_core_tests PRIVATE microfs::microfs)
   if(NOT MSVC)
-    target_compile_options(microfs_core_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(microfs_core_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
   endif()
   add_test(NAME microfs_core_tests COMMAND microfs_core_tests)
 endif()

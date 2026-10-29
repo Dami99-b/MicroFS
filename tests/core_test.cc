@@ -4,13 +4,16 @@
 #include "microfs/bloom_filter.h"
 #include "microfs/coding.h"
 #include "microfs/crc32c.h"
+#include "microfs/db.h"
 #include "microfs/env.h"
 #include "microfs/hash.h"
 #include "microfs/histogram.h"
+#include "microfs/internal_key.h"
 #include "microfs/memtable.h"
 #include "microfs/skiplist.h"
 #include "microfs/status.h"
 #include "microfs/table.h"
+#include "microfs/version_set.h"
 #include "test_harness.h"
 #include "microfs/wal.h"
 
@@ -22,6 +25,8 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <random>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -237,6 +242,34 @@ MICROFS_TEST(MemTableSnapshotAndDeletion) {
                 microfs::StatusCode::kNotFound);
   MICROFS_CHECK(table.Get("missing", 3).status().code() ==
                 microfs::StatusCode::kNotFound);
+}
+
+MICROFS_TEST(InternalKeyByteOrderAndBinaryRoundTrip) {
+  std::string newest;
+  std::string older;
+  std::string longer_user_key;
+  MICROFS_CHECK(microfs::EncodeInternalKey("a", 9, microfs::ValueType::kValue,
+                                           &newest)
+                    .ok());
+  MICROFS_CHECK(microfs::EncodeInternalKey("a", 3, microfs::ValueType::kValue,
+                                           &older)
+                    .ok());
+  const std::string binary_key("a\0", 2);
+  MICROFS_CHECK(microfs::EncodeInternalKey(
+                    binary_key, 1, microfs::ValueType::kValue,
+                    &longer_user_key)
+                    .ok());
+  MICROFS_CHECK(microfs::LexicographicComparator()(newest, older) < 0);
+  MICROFS_CHECK(microfs::LexicographicComparator()(older, longer_user_key) < 0);
+  std::string decoded_key;
+  std::uint64_t sequence = 0;
+  microfs::ValueType type = microfs::ValueType::kDeletion;
+  MICROFS_CHECK(
+      microfs::DecodeInternalKey(longer_user_key, &decoded_key, &sequence, &type)
+          .ok());
+  MICROFS_CHECK(decoded_key == binary_key);
+  MICROFS_CHECK(sequence == 1);
+  MICROFS_CHECK(type == microfs::ValueType::kValue);
 }
 
 MICROFS_TEST(WalFragmentationAndTailRecovery) {
@@ -526,6 +559,333 @@ MICROFS_TEST(EmptyTableRoundTrip) {
   MICROFS_CHECK(opened.value()->Get("missing", &value).code() ==
                 microfs::StatusCode::kNotFound);
   MICROFS_CHECK(env->RemoveFile(path).ok());
+}
+
+MICROFS_TEST(VersionSetManifestReplayAndTailRecovery) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("versions");
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  std::uint64_t table_number = 0;
+  {
+    auto opened = microfs::VersionSet::Open(env.get(), path);
+    MICROFS_CHECK(opened.ok());
+    auto versions = std::move(opened).value();
+    table_number = versions->NewFileNumber();
+    MICROFS_CHECK(table_number == 2);
+    microfs::VersionEdit edit;
+    edit.last_sequence = 10;
+    edit.next_file_number = versions->next_file_number();
+    edit.added_files.push_back({table_number, 0, 123, "a", "z"});
+    MICROFS_CHECK(versions->LogAndApply(edit).ok());
+    MICROFS_CHECK(versions->Files().size() == 1);
+    MICROFS_CHECK(versions->last_sequence() == 10);
+  }
+
+  const auto manifest_path =
+      (std::filesystem::path(path) / "MANIFEST-000001").string();
+  const std::array<std::byte, 3> torn{std::byte{1}, std::byte{2},
+                                      std::byte{3}};
+  MICROFS_CHECK(env->AppendFile(manifest_path, torn).ok());
+  {
+    auto reopened = microfs::VersionSet::Open(env.get(), path);
+    MICROFS_CHECK(reopened.ok());
+    auto versions = std::move(reopened).value();
+    MICROFS_CHECK(versions->Files().size() == 1);
+    MICROFS_CHECK(versions->last_sequence() == 10);
+    microfs::VersionEdit edit;
+    edit.last_sequence = 11;
+    edit.next_file_number = versions->next_file_number();
+    edit.deleted_files.emplace_back(0, table_number);
+    MICROFS_CHECK(versions->LogAndApply(edit).ok());
+  }
+  auto final_version = microfs::VersionSet::Open(env.get(), path);
+  MICROFS_CHECK(final_version.ok());
+  MICROFS_CHECK(final_version.value()->Files().empty());
+  MICROFS_CHECK(final_version.value()->last_sequence() == 11);
+  final_version.value().reset();
+  std::filesystem::remove_all(path, error);
+}
+
+MICROFS_TEST(EnvironmentExclusiveFileLock) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("lock");
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  MICROFS_CHECK(env->LockFile(path).ok());
+  MICROFS_CHECK(env->LockFile(path).code() == microfs::StatusCode::kBusy);
+  MICROFS_CHECK(env->UnlockFile(path).ok());
+  MICROFS_CHECK(env->LockFile(path).ok());
+  MICROFS_CHECK(env->UnlockFile(path).ok());
+  MICROFS_CHECK(env->RemoveFile(path).ok());
+}
+
+MICROFS_TEST(DatabaseCrudSnapshotsIteratorsAndRecovery) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("db-crud");
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  microfs::DBOptions options;
+  options.write_buffer_size = 4096;
+  options.l0_compaction_trigger = 3;
+  options.l0_write_slowdown_trigger = 6;
+  options.l0_stop_writes_trigger = 9;
+  std::string value;
+  microfs::Snapshot snapshot;
+  {
+    auto opened = microfs::DB::Open(env.get(), path, options);
+    MICROFS_CHECK(opened.ok());
+    auto db = std::move(opened).value();
+    auto duplicate = microfs::DB::Open(env.get(), path, options);
+    MICROFS_CHECK(!duplicate.ok());
+    MICROFS_CHECK(duplicate.status().code() == microfs::StatusCode::kBusy);
+    MICROFS_CHECK(db->Put("", "empty-key").ok());
+    MICROFS_CHECK(db->Put("alpha", "one").ok());
+    const std::string_view binary_key("binary\0key", 10);
+    MICROFS_CHECK(db->Put(binary_key, "binary").ok());
+    auto snapshot_result = db->GetSnapshot();
+    MICROFS_CHECK(snapshot_result.ok());
+    snapshot = snapshot_result.value();
+    MICROFS_CHECK(db->Put("alpha", "two").ok());
+    MICROFS_CHECK(db->Delete("").ok());
+
+    MICROFS_CHECK(db->Get("alpha", &value).ok());
+    MICROFS_CHECK(value == "two");
+    MICROFS_CHECK(db->Get("alpha", &value, &snapshot).ok());
+    MICROFS_CHECK(value == "one");
+    MICROFS_CHECK(db->Get("", &value).code() ==
+                  microfs::StatusCode::kNotFound);
+    MICROFS_CHECK(db->Get("", &value, &snapshot).ok());
+    MICROFS_CHECK(value == "empty-key");
+    MICROFS_CHECK(db->Get("foreign", &value, &snapshot).code() ==
+                  microfs::StatusCode::kNotFound);
+
+    microfs::WriteBatch batch;
+    MICROFS_CHECK(batch.Put("beta", "B").ok());
+    MICROFS_CHECK(batch.Put("gamma", "G").ok());
+    MICROFS_CHECK(batch.Delete("alpha").ok());
+    MICROFS_CHECK(db->Write(batch).ok());
+    MICROFS_CHECK(db->Get("alpha", &value).code() ==
+                  microfs::StatusCode::kNotFound);
+    MICROFS_CHECK(db->Get("alpha", &value, &snapshot).ok());
+    MICROFS_CHECK(value == "one");
+
+    auto iterator_result = db->NewIterator(&snapshot);
+    MICROFS_CHECK(iterator_result.ok());
+    auto iterator = std::move(iterator_result).value();
+    iterator->SeekToFirst();
+    MICROFS_CHECK(iterator->Valid());
+    MICROFS_CHECK(iterator->key().empty());
+    iterator->Next();
+    MICROFS_CHECK(iterator->key() == "alpha");
+    iterator->SeekToLast();
+    MICROFS_CHECK(iterator->key() == binary_key);
+    iterator->Prev();
+    MICROFS_CHECK(iterator->key() == "alpha");
+    MICROFS_CHECK(db->ReleaseSnapshot(snapshot).ok());
+    MICROFS_CHECK(db->NewIterator(&snapshot).status().code() ==
+                  microfs::StatusCode::kInvalidArgument);
+    MICROFS_CHECK(db->Close().ok());
+    MICROFS_CHECK(db->Get("alpha", &value).code() ==
+                  microfs::StatusCode::kBusy);
+  }
+  {
+    auto reopened = microfs::DB::Open(env.get(), path, options);
+    MICROFS_CHECK(reopened.ok());
+    auto db = std::move(reopened).value();
+    MICROFS_CHECK(db->Get("beta", &value).ok());
+    MICROFS_CHECK(value == "B");
+    MICROFS_CHECK(db->Get("gamma", &value).ok());
+    MICROFS_CHECK(value == "G");
+    MICROFS_CHECK(db->Get("alpha", &value).code() ==
+                  microfs::StatusCode::kNotFound);
+    MICROFS_CHECK(db->Close().ok());
+  }
+  std::filesystem::remove_all(path, error);
+}
+
+MICROFS_TEST(DatabaseAutomaticFlushAndCompaction) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("db-flush");
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  microfs::DBOptions options;
+  options.write_buffer_size = 256;
+  options.arena_block_size = 128;
+  options.l0_compaction_trigger = 2;
+  options.l0_write_slowdown_trigger = 4;
+  options.l0_stop_writes_trigger = 8;
+  options.table_options.data_block_size = 128;
+  std::string value;
+  {
+    auto opened = microfs::DB::Open(env.get(), path, options);
+    MICROFS_CHECK(opened.ok());
+    auto db = std::move(opened).value();
+    for (std::size_t i = 0; i < 80; ++i) {
+      const std::string key = "key-" + std::to_string(i);
+      MICROFS_CHECK(db->Put(key, "value-" + std::to_string(i)).ok());
+    }
+    MICROFS_CHECK(db->Compact().ok());
+    for (std::size_t i = 0; i < 80; ++i) {
+      const std::string key = "key-" + std::to_string(i);
+      MICROFS_CHECK(db->Get(key, &value).ok());
+      MICROFS_CHECK(value == "value-" + std::to_string(i));
+    }
+    auto l0 = db->GetProperty("microfs.num-files-at-level0");
+    auto l1 = db->GetProperty("microfs.num-files-at-level1");
+    MICROFS_CHECK(l0.ok() && l0.value() == "0");
+    MICROFS_CHECK(l1.ok() && l1.value() == "1");
+    MICROFS_CHECK(db->Close().ok());
+  }
+  {
+    auto reopened = microfs::DB::Open(env.get(), path, options);
+    MICROFS_CHECK(reopened.ok());
+    auto db = std::move(reopened).value();
+    for (std::size_t i = 0; i < 80; ++i) {
+      const std::string key = "key-" + std::to_string(i);
+      MICROFS_CHECK(db->Get(key, &value).ok());
+    }
+    MICROFS_CHECK(db->Close().ok());
+  }
+  std::filesystem::remove_all(path, error);
+}
+
+MICROFS_TEST(DatabaseOracleTenThousandOperations) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("db-oracle");
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  microfs::DBOptions options;
+  options.write_buffer_size = 512 * 1024 * 1024;
+  options.wal_options.sync_policy = microfs::SyncPolicy::kNever;
+  std::unique_ptr<microfs::DB> db;
+  auto open_database = [&] {
+    auto opened = microfs::DB::Open(env.get(), path, options);
+    if (!opened.ok()) throw std::runtime_error(opened.status().message());
+    db = std::move(opened).value();
+  };
+  open_database();
+
+  std::mt19937_64 random(0x6d6963726f667331ULL);
+  std::map<std::string, std::string> oracle;
+  struct OracleSnapshot {
+    microfs::Snapshot snapshot;
+    std::map<std::string, std::string> state;
+  };
+  std::optional<OracleSnapshot> active_snapshot;
+  for (std::size_t operation = 0; operation < 10000; ++operation) {
+    const std::string key = "k-" + std::to_string(random() % 512);
+    const std::uint64_t choice = random() % 100;
+    if (choice < 30) {
+      const std::string value =
+          "v-" + std::to_string(random() % 1000000) + "-" +
+          std::to_string(operation);
+      MICROFS_CHECK(db->Put(key, value).ok());
+      oracle.insert_or_assign(key, value);
+    } else if (choice < 42) {
+      MICROFS_CHECK(db->Delete(key).ok());
+      oracle.erase(key);
+    } else if (choice < 78) {
+      std::string actual;
+      const microfs::Status status = db->Get(key, &actual);
+      const auto expected = oracle.find(key);
+      if (expected == oracle.end()) {
+        MICROFS_CHECK(status.code() == microfs::StatusCode::kNotFound);
+      } else {
+        MICROFS_CHECK(status.ok());
+        MICROFS_CHECK(actual == expected->second);
+      }
+    } else if (choice < 97) {
+      std::string target = "k-" + std::to_string(random() % 512);
+      auto iterator_result = db->NewIterator();
+      MICROFS_CHECK(iterator_result.ok());
+      auto iterator = std::move(iterator_result).value();
+      iterator->Seek(target);
+      auto expected = oracle.lower_bound(target);
+      MICROFS_CHECK(iterator->Valid() == (expected != oracle.end()));
+      std::size_t scanned = 0;
+      while (iterator->Valid() && scanned < 8) {
+        MICROFS_CHECK(expected != oracle.end());
+        MICROFS_CHECK(iterator->key() == expected->first);
+        MICROFS_CHECK(iterator->value() == expected->second);
+        iterator->Next();
+        ++expected;
+        ++scanned;
+      }
+    } else if (!active_snapshot.has_value()) {
+      auto result = db->GetSnapshot();
+      MICROFS_CHECK(result.ok());
+      active_snapshot.emplace(
+          OracleSnapshot{result.value(), oracle});
+    } else {
+      const std::string snapshot_key =
+          "k-" + std::to_string(random() % 512);
+      std::string actual;
+      const microfs::Status status =
+          db->Get(snapshot_key, &actual, &active_snapshot->snapshot);
+      const auto expected = active_snapshot->state.find(snapshot_key);
+      if (expected == active_snapshot->state.end()) {
+        MICROFS_CHECK(status.code() == microfs::StatusCode::kNotFound);
+      } else {
+        MICROFS_CHECK(status.ok());
+        MICROFS_CHECK(actual == expected->second);
+      }
+      if (random() % 4 == 0) {
+        MICROFS_CHECK(db->ReleaseSnapshot(active_snapshot->snapshot).ok());
+        active_snapshot.reset();
+      }
+    }
+
+    if ((operation + 1) % 2500 == 0 &&
+        operation + 1 != 10000) {
+      if (active_snapshot.has_value()) {
+        MICROFS_CHECK(db->ReleaseSnapshot(active_snapshot->snapshot).ok());
+        active_snapshot.reset();
+      }
+      MICROFS_CHECK(db->Close().ok());
+      db.reset();
+      open_database();
+      for (std::size_t check = 0; check < 512; ++check) {
+        const std::string check_key = "k-" + std::to_string(check);
+        std::string actual;
+        const microfs::Status status = db->Get(check_key, &actual);
+        const auto expected = oracle.find(check_key);
+        if (expected == oracle.end()) {
+          MICROFS_CHECK(status.code() == microfs::StatusCode::kNotFound);
+        } else {
+          MICROFS_CHECK(status.ok());
+          MICROFS_CHECK(actual == expected->second);
+        }
+      }
+    }
+  }
+  if (active_snapshot.has_value()) {
+    MICROFS_CHECK(db->ReleaseSnapshot(active_snapshot->snapshot).ok());
+  }
+  auto scan_result = db->NewIterator();
+  MICROFS_CHECK(scan_result.ok());
+  auto scan = std::move(scan_result).value();
+  scan->SeekToFirst();
+  auto expected = oracle.begin();
+  while (scan->Valid() && expected != oracle.end()) {
+    MICROFS_CHECK(scan->key() == expected->first);
+    MICROFS_CHECK(scan->value() == expected->second);
+    scan->Next();
+    ++expected;
+  }
+  MICROFS_CHECK(!scan->Valid());
+  MICROFS_CHECK(expected == oracle.end());
+  MICROFS_CHECK(db->Close().ok());
+  db.reset();
+  open_database();
+  for (const auto& [key, expected_value] : oracle) {
+    std::string actual;
+    MICROFS_CHECK(db->Get(key, &actual).ok());
+    MICROFS_CHECK(actual == expected_value);
+  }
+  MICROFS_CHECK(db->Close().ok());
+  db.reset();
+  std::filesystem::remove_all(path, error);
 }
 
 }  // namespace

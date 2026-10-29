@@ -408,9 +408,17 @@ Status Table::LoadDataBlock(
 }
 
 Status Table::Get(std::string_view key, std::string* value) const {
-  if (value == nullptr) return Status::InvalidArgument("null table value output");
-  if (!key_filter_.MayContain(key) || !MayContainPrefix(key)) {
-    return Status::NotFound("key was excluded by table filter");
+  std::string found_key;
+  Status status = GetAtOrAfter(key, &found_key, value);
+  if (!status.ok()) return status;
+  if (found_key != key) return Status::NotFound("key is not in this table");
+  return Status::OK();
+}
+
+Status Table::GetAtOrAfter(std::string_view key, std::string* found_key,
+                           std::string* value) const {
+  if (found_key == nullptr || value == nullptr) {
+    return Status::InvalidArgument("null table lookup output");
   }
   BlockReader index;
   Status status = index.Open(index_data_);
@@ -431,12 +439,46 @@ Status Table::Get(std::string_view key, std::string* value) const {
   block.Seek(key);
   if (!block.status().ok()) return block.status();
   if (!block.Valid() || block.key() != key) {
-    return Status::NotFound("key is not in this table");
+    if (!block.Valid()) return Status::NotFound("no table key follows search key");
   }
   try {
+    found_key->assign(block.key());
     value->assign(block.value());
   } catch (...) {
     return Status::ResourceExhausted("copying table value failed");
+  }
+  return Status::OK();
+}
+
+Status Table::ReadEntries(
+    std::vector<std::pair<std::string, std::string>>* entries) const {
+  if (entries == nullptr) return Status::InvalidArgument("null table entries output");
+  BlockReader index;
+  Status status = index.Open(index_data_);
+  if (!status.ok()) return status;
+  index.SeekToFirst();
+  try {
+    while (index.Valid()) {
+      BlockHandle handle;
+      if (!DecodeHandle(index.value(), &handle)) {
+        return Status::Corruption("invalid table index entry");
+      }
+      std::string data;
+      status = ReadBlock(handle, &data);
+      if (!status.ok()) return status;
+      BlockReader block;
+      status = block.Open(data);
+      if (!status.ok()) return status;
+      block.SeekToFirst();
+      while (block.Valid()) {
+        entries->emplace_back(block.key(), block.value());
+        block.Next();
+      }
+      if (!block.status().ok()) return block.status();
+      index.Next();
+    }
+  } catch (...) {
+    return Status::ResourceExhausted("collecting table entries failed");
   }
   return Status::OK();
 }

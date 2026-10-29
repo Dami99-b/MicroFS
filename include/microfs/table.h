@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "microfs/block.h"
@@ -68,6 +69,10 @@ class Table {
   Table& operator=(const Table&) = delete;
 
   Status Get(std::string_view key, std::string* value) const;
+  Status GetAtOrAfter(std::string_view key, std::string* found_key,
+                      std::string* value) const;
+  Status ReadEntries(
+      std::vector<std::pair<std::string, std::string>>* entries) const;
   [[nodiscard]] bool MayContain(std::string_view key) const;
   [[nodiscard]] bool MayContainPrefix(std::string_view key) const;
   [[nodiscard]] std::uint64_t file_size() const { return file_data_.size(); }

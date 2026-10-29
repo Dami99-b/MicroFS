@@ -6,13 +6,21 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include <sys/stat.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -26,6 +34,21 @@ std::string ErrnoMessage(const std::string& operation,
 
 class StandardEnv final : public Env {
  public:
+  ~StandardEnv() override {
+    std::lock_guard<std::mutex> lock(lock_mutex_);
+    for (auto& entry : locks_) {
+#ifdef _WIN32
+      HANDLE handle =
+          reinterpret_cast<HANDLE>(_get_osfhandle(entry.second.descriptor));
+      UnlockFileEx(handle, 0, 1, 0, &entry.second.overlapped);
+      _close(entry.second.descriptor);
+#else
+      flock(entry.second, LOCK_UN);
+      close(entry.second);
+#endif
+    }
+  }
+
   Status ReadFile(const std::string& path,
                   std::vector<std::byte>* contents) override {
     if (contents == nullptr) return Status::InvalidArgument("null output");
@@ -145,6 +168,97 @@ class StandardEnv final : public Env {
     }
     return Status::OK();
   }
+
+  Status LockFile(const std::string& path) override {
+    std::lock_guard<std::mutex> lock(lock_mutex_);
+    if (locks_.contains(path)) return Status::Busy("file is already locked");
+#ifdef _WIN32
+    const int descriptor = _open(path.c_str(),
+                                 _O_CREAT | _O_RDWR | _O_BINARY,
+                                 _S_IREAD | _S_IWRITE);
+    if (descriptor < 0) return Status::IOError(ErrnoMessage("open", path));
+    LockHandle lock_handle{descriptor, {}};
+    HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(descriptor));
+    if (!LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0, 1, 0, &lock_handle.overlapped)) {
+      const DWORD error = GetLastError();
+      const bool busy = error == ERROR_LOCK_VIOLATION;
+      _close(descriptor);
+      return busy ? Status::Busy("database directory is locked")
+                  : Status::IOError("locking '" + path +
+                                    "' failed with Windows error " +
+                                    std::to_string(error));
+    }
+#else
+    const int descriptor = open(path.c_str(), O_CREAT | O_RDWR, 0644);
+    if (descriptor < 0) return Status::IOError(ErrnoMessage("open", path));
+    if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
+      const bool busy = errno == EWOULDBLOCK || errno == EAGAIN;
+      close(descriptor);
+      return busy ? Status::Busy("database directory is locked")
+                  : Status::IOError(ErrnoMessage("lock", path));
+    }
+#endif
+    try {
+#ifdef _WIN32
+      locks_.emplace(path, lock_handle);
+#else
+      locks_.emplace(path, descriptor);
+#endif
+    } catch (...) {
+#ifdef _WIN32
+      UnlockFileEx(handle, 0, 1, 0, &lock_handle.overlapped);
+      _close(descriptor);
+#else
+      flock(descriptor, LOCK_UN);
+      close(descriptor);
+#endif
+      return Status::ResourceExhausted("tracking file lock exhausted memory");
+    }
+    return Status::OK();
+  }
+
+  Status UnlockFile(const std::string& path) override {
+    std::lock_guard<std::mutex> lock(lock_mutex_);
+    const auto found = locks_.find(path);
+    if (found == locks_.end()) return Status::NotFound("file is not locked");
+#ifdef _WIN32
+    LockHandle lock_handle = found->second;
+    locks_.erase(found);
+    HANDLE handle =
+        reinterpret_cast<HANDLE>(_get_osfhandle(lock_handle.descriptor));
+    const BOOL result =
+        UnlockFileEx(handle, 0, 1, 0, &lock_handle.overlapped);
+    _close(lock_handle.descriptor);
+#else
+    const int descriptor = found->second;
+    locks_.erase(found);
+    const int result = flock(descriptor, LOCK_UN);
+    close(descriptor);
+#endif
+#ifdef _WIN32
+    if (result == 0) {
+      return Status::IOError("unlocking '" + path +
+                              "' failed with Windows error " +
+                              std::to_string(GetLastError()));
+    }
+#else
+    if (result != 0) return Status::IOError(ErrnoMessage("unlock", path));
+#endif
+    return Status::OK();
+  }
+
+ private:
+#ifdef _WIN32
+  struct LockHandle {
+    int descriptor;
+    OVERLAPPED overlapped;
+  };
+  std::unordered_map<std::string, LockHandle> locks_;
+#else
+  std::unordered_map<std::string, int> locks_;
+#endif
+  std::mutex lock_mutex_;
 };
 
 }  // namespace
@@ -291,6 +405,18 @@ Status FaultInjectingEnv::CreateDirectories(const std::string& path) {
   Status status = MaybeFail();
   if (!status.ok()) return status;
   return base_->CreateDirectories(path);
+}
+
+Status FaultInjectingEnv::LockFile(const std::string& path) {
+  Status status = MaybeFail();
+  if (!status.ok()) return status;
+  return base_->LockFile(path);
+}
+
+Status FaultInjectingEnv::UnlockFile(const std::string& path) {
+  Status status = MaybeFail();
+  if (!status.ok()) return status;
+  return base_->UnlockFile(path);
 }
 
 void FaultInjectingEnv::Crash() { pending_.clear(); }

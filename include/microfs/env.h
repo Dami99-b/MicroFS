@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,8 @@ class Env {
   virtual Status RemoveFile(const std::string& path) = 0;
   virtual Status FileExists(const std::string& path, bool* exists) = 0;
   virtual Status CreateDirectories(const std::string& path) = 0;
+  virtual Status LockFile(const std::string& path) = 0;
+  virtual Status UnlockFile(const std::string& path) = 0;
 };
 
 std::unique_ptr<Env> NewDefaultEnv();
@@ -49,6 +52,8 @@ class FaultInjectingEnv final : public Env {
   Status RemoveFile(const std::string& path) override;
   Status FileExists(const std::string& path, bool* exists) override;
   Status CreateDirectories(const std::string& path) override;
+  Status LockFile(const std::string& path) override;
+  Status UnlockFile(const std::string& path) override;
 
   void Crash();
   void TearNextWrite(std::size_t bytes);
