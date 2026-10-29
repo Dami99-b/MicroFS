@@ -26,7 +26,11 @@ if (Test-Path $executable) {
 $env:PATH = (Split-Path $compiler.Source) + ';' + $env:PATH
 & $compiler.Source -std=c++20 -O2 -Wall -Wextra -Wpedantic `
   -I (Join-Path $PSScriptRoot '..\include') `
+  (Join-Path $PSScriptRoot '..\src\block.cc') `
+  (Join-Path $PSScriptRoot '..\src\block_cache.cc') `
+  (Join-Path $PSScriptRoot '..\src\bloom_filter.cc') `
   (Join-Path $PSScriptRoot '..\src\env.cc') `
+  (Join-Path $PSScriptRoot '..\src\table.cc') `
   (Join-Path $PSScriptRoot '..\src\wal.cc') `
   (Join-Path $PSScriptRoot '..\tests\core_test.cc') `
   -o $executable

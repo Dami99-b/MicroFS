@@ -43,3 +43,15 @@ unmeasured performance.
 - Group commit combines concurrently queued records into one append and one
   required sync per processing batch. Batching depends on scheduling and is
   not guaranteed for every concurrent run.
+
+## Phase 3
+
+- Data, index, and filter blocks use the same restart-compressed block encoding
+  and each block is followed by a little-endian CRC32C trailer.
+- The table footer is a fixed 40-byte record containing a magic value and the
+  index and filter block handles. Bloom filters use MurmurHash3 double hashing.
+- Prefix filters are optional and index the first configured number of key
+  bytes; callers must use the same key-prefix convention as the table writer.
+- The table reader currently loads the whole table through Env rather than
+  using mmap or pread. This portable implementation is not represented as a
+  zero-copy or memory-mapped reader.

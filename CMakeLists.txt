@@ -6,7 +6,11 @@ option(MICROFS_BUILD_TESTS "Build MicroFS tests" ON)
 find_package(Threads REQUIRED)
 
 add_library(microfs
+  src/block.cc
+  src/block_cache.cc
+  src/bloom_filter.cc
   src/env.cc
+  src/table.cc
   src/wal.cc
 )
 add_library(microfs::microfs ALIAS microfs)

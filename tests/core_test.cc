@@ -1,4 +1,7 @@
 #include "microfs/arena.h"
+#include "microfs/block.h"
+#include "microfs/block_cache.h"
+#include "microfs/bloom_filter.h"
 #include "microfs/coding.h"
 #include "microfs/crc32c.h"
 #include "microfs/env.h"
@@ -7,6 +10,7 @@
 #include "microfs/memtable.h"
 #include "microfs/skiplist.h"
 #include "microfs/status.h"
+#include "microfs/table.h"
 #include "test_harness.h"
 #include "microfs/wal.h"
 
@@ -14,7 +18,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -357,6 +363,169 @@ MICROFS_TEST(WalPropagatesAndRetainsWriteFailures) {
   std::vector<std::string> records;
   MICROFS_CHECK(microfs::WAL::Recover(&env, path, &records).code() ==
                 microfs::StatusCode::kNotFound);
+}
+
+MICROFS_TEST(BlockPrefixCompressionAndIteration) {
+  microfs::BlockBuilder builder(2);
+  MICROFS_CHECK(builder.Add("", "empty").ok());
+  MICROFS_CHECK(builder.Add("a", "one").ok());
+  MICROFS_CHECK(builder.Add("aa", "two").ok());
+  MICROFS_CHECK(builder.Add("ab", "three").ok());
+  MICROFS_CHECK(builder.Add("b", "four").ok());
+  std::string encoded;
+  MICROFS_CHECK(builder.Finish(&encoded).ok());
+  MICROFS_CHECK(encoded.size() < 5 * (3 + 1 + 8));
+
+  microfs::BlockReader reader;
+  MICROFS_CHECK(reader.Open(encoded).ok());
+  reader.SeekToFirst();
+  MICROFS_CHECK(reader.Valid() && reader.key().empty());
+  MICROFS_CHECK(reader.value() == "empty");
+  reader.Next();
+  MICROFS_CHECK(reader.key() == "a");
+  reader.Seek("az");
+  MICROFS_CHECK(reader.Valid() && reader.key() == "b");
+  reader.Prev();
+  MICROFS_CHECK(reader.key() == "ab");
+  reader.SeekToLast();
+  MICROFS_CHECK(reader.key() == "b");
+  reader.Next();
+  MICROFS_CHECK(!reader.Valid());
+
+  std::string corrupt = encoded;
+  corrupt[corrupt.size() - 1] = 0;
+  corrupt[corrupt.size() - 2] = 0;
+  corrupt[corrupt.size() - 3] = 0;
+  corrupt[corrupt.size() - 4] = 0;
+  MICROFS_CHECK(!reader.Open(corrupt).ok());
+  MICROFS_CHECK(!builder.Add("aa", "duplicate").ok());
+
+  microfs::BlockBuilder empty_builder;
+  MICROFS_CHECK(empty_builder.Finish(&encoded).ok());
+  MICROFS_CHECK(reader.Open(encoded).ok());
+  reader.SeekToFirst();
+  MICROFS_CHECK(!reader.Valid());
+}
+
+MICROFS_TEST(BloomFilterFalsePositiveAndRoundTrip) {
+  constexpr std::size_t kEntries = 10000;
+  auto created = microfs::BloomFilter::Create(kEntries, 10);
+  MICROFS_CHECK(created.ok());
+  microfs::BloomFilter filter = std::move(created).value();
+  for (std::size_t i = 0; i < kEntries; ++i) {
+    MICROFS_CHECK(filter.Add("present-" + std::to_string(i)).ok());
+  }
+  for (std::size_t i = 0; i < kEntries; ++i) {
+    MICROFS_CHECK(filter.MayContain("present-" + std::to_string(i)));
+  }
+  std::size_t false_positives = 0;
+  for (std::size_t i = 0; i < kEntries; ++i) {
+    if (filter.MayContain("absent-" + std::to_string(i))) {
+      ++false_positives;
+    }
+  }
+  MICROFS_CHECK(false_positives * 100 < kEntries * 2);
+
+  std::string encoded;
+  MICROFS_CHECK(filter.Encode(&encoded).ok());
+  auto decoded = microfs::BloomFilter::Decode(encoded);
+  MICROFS_CHECK(decoded.ok());
+  for (std::size_t i = 0; i < kEntries; ++i) {
+    MICROFS_CHECK(decoded.value().MayContain("present-" + std::to_string(i)));
+  }
+  encoded.pop_back();
+  MICROFS_CHECK(!microfs::BloomFilter::Decode(encoded).ok());
+}
+
+MICROFS_TEST(BlockCacheLruAndCounters) {
+  microfs::BlockCache cache(1024, 4);
+  auto first = std::make_shared<const std::string>("first");
+  MICROFS_CHECK(cache.Insert(1, 10, first).ok());
+  MICROFS_CHECK(!cache.Get(1, 11));
+  MICROFS_CHECK(cache.Get(1, 10) == first);
+  MICROFS_CHECK(cache.hits() == 1);
+  MICROFS_CHECK(cache.misses() == 1);
+  MICROFS_CHECK(cache.hit_rate() == 0.5);
+  MICROFS_CHECK(!cache.Insert(1, 12, nullptr).ok());
+}
+
+MICROFS_TEST(TableBuildReadCacheAndCorruption) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("table");
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  microfs::TableOptions options;
+  options.data_block_size = 100;
+  options.restart_interval = 3;
+  options.prefix_length = 1;
+  auto created = microfs::TableBuilder::Create(env.get(), path, options);
+  MICROFS_CHECK(created.ok());
+  auto builder = std::move(created).value();
+  for (std::size_t i = 0; i < 80; ++i) {
+    char key[16];
+    std::snprintf(key, sizeof(key), "S%04zu", i);
+    MICROFS_CHECK(builder->Add(key, "value-" + std::to_string(i)).ok());
+  }
+  for (std::size_t i = 0; i < 20; ++i) {
+    char key[16];
+    std::snprintf(key, sizeof(key), "T%04zu", i);
+    MICROFS_CHECK(builder->Add(key, "other-" + std::to_string(i)).ok());
+  }
+  MICROFS_CHECK(builder->Finish().ok());
+
+  microfs::BlockCache cache(1024 * 32, 4);
+  auto opened = microfs::Table::Open(env.get(), path, &cache);
+  if (!opened.ok()) {
+    throw std::runtime_error(opened.status().message());
+  }
+  MICROFS_CHECK(opened.ok());
+  auto table = std::move(opened).value();
+  std::string value;
+  MICROFS_CHECK(table->Get("S0012", &value).ok());
+  MICROFS_CHECK(value == "value-12");
+  MICROFS_CHECK(table->Get("S0012", &value).ok());
+  MICROFS_CHECK(cache.hits() > 0);
+  MICROFS_CHECK(cache.misses() > 0);
+  MICROFS_CHECK(table->MayContainPrefix("S0079"));
+  MICROFS_CHECK(!table->MayContainPrefix("X0001"));
+  MICROFS_CHECK(table->Get("S9999", &value).code() ==
+                microfs::StatusCode::kNotFound);
+
+  table.reset();
+  std::vector<std::byte> file;
+  MICROFS_CHECK(env->ReadFile(path, &file).ok());
+  file[0] ^= std::byte{1};
+  MICROFS_CHECK(env->WriteFile(path, file).ok());
+  MICROFS_CHECK(env->SyncFile(path).ok());
+  auto corrupt = microfs::Table::Open(env.get(), path);
+  MICROFS_CHECK(!corrupt.ok());
+  MICROFS_CHECK(corrupt.status().code() == microfs::StatusCode::kCorruption);
+
+  file[0] ^= std::byte{1};
+  file.pop_back();
+  MICROFS_CHECK(env->WriteFile(path, file).ok());
+  MICROFS_CHECK(env->SyncFile(path).ok());
+  auto truncated = microfs::Table::Open(env.get(), path);
+  MICROFS_CHECK(!truncated.ok());
+  MICROFS_CHECK(truncated.status().code() == microfs::StatusCode::kCorruption);
+  MICROFS_CHECK(env->RemoveFile(path).ok());
+}
+
+MICROFS_TEST(EmptyTableRoundTrip) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("empty-table");
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  auto created = microfs::TableBuilder::Create(env.get(), path);
+  MICROFS_CHECK(created.ok());
+  auto builder = std::move(created).value();
+  MICROFS_CHECK(builder->Finish().ok());
+  auto opened = microfs::Table::Open(env.get(), path);
+  MICROFS_CHECK(opened.ok());
+  std::string value;
+  MICROFS_CHECK(opened.value()->Get("missing", &value).code() ==
+                microfs::StatusCode::kNotFound);
+  MICROFS_CHECK(env->RemoveFile(path).ok());
 }
 
 }  // namespace
