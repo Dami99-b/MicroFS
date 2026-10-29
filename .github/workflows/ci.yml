@@ -24,6 +24,8 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Benchmark smoke
+        run: build/microfs_bench 100 build/benchmark-smoke
 
   sanitizers:
     strategy:

@@ -86,3 +86,11 @@ unmeasured performance.
 - Fuzz targets and CI workflows are provided for supported Clang/Linux
   environments, but cannot be run with the Windows GCC toolchain available in
   this session. Native sanitizer and POSIX results remain unverified.
+
+## Phase 6
+
+- The current benchmark intentionally measures only single-threaded random
+  writes and random hit reads with WAL sync disabled. Results are not durable
+  throughput and are not compared against another engine.
+- No profiling-driven optimization or broader experiment matrix is claimed.
+  Windows profiling tools were not available during this implementation.

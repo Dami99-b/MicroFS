@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('build', 'test', 'cli', 'clean')]
+  [ValidateSet('build', 'test', 'cli', 'bench', 'clean')]
   [string]$Action = 'test'
 )
 
@@ -7,9 +7,10 @@ $ErrorActionPreference = 'Stop'
 $buildDirectory = Join-Path $PSScriptRoot '..\build'
 $testExecutable = Join-Path $buildDirectory 'microfs_core_tests.exe'
 $cliExecutable = Join-Path $buildDirectory 'microfs_cli.exe'
+$benchExecutable = Join-Path $buildDirectory 'microfs_bench.exe'
 
 if ($Action -eq 'clean') {
-  foreach ($target in @($testExecutable, $cliExecutable)) {
+  foreach ($target in @($testExecutable, $cliExecutable, $benchExecutable)) {
     if (Test-Path $target) {
       Remove-Item -LiteralPath $target -Force
     }
@@ -36,14 +37,19 @@ $sources = @(
   (Join-Path $PSScriptRoot '..\src\wal.cc')
 )
 
-if ($Action -eq 'cli') {
-  if (Test-Path $cliExecutable) {
-    Remove-Item -LiteralPath $cliExecutable -Force
+if ($Action -eq 'cli' -or $Action -eq 'bench') {
+  $toolExecutable = $cliExecutable
+  $toolSource = Join-Path $PSScriptRoot '..\tools\microfs_cli.cc'
+  if ($Action -eq 'bench') {
+    $toolExecutable = $benchExecutable
+    $toolSource = Join-Path $PSScriptRoot '..\bench\microfs_bench.cc'
+  }
+  if (Test-Path $toolExecutable) {
+    Remove-Item -LiteralPath $toolExecutable -Force
   }
   & $compiler.Source -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror `
     -I (Join-Path $PSScriptRoot '..\include') `
-    $sources (Join-Path $PSScriptRoot '..\tools\microfs_cli.cc') `
-    -o $cliExecutable
+    $sources $toolSource -o $toolExecutable
   exit $LASTEXITCODE
 }
 

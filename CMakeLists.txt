@@ -3,6 +3,7 @@ project(MicroFS VERSION 0.1.0 LANGUAGES CXX)
 
 option(MICROFS_BUILD_TESTS "Build MicroFS tests" ON)
 option(MICROFS_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
+option(MICROFS_BUILD_BENCHMARKS "Build reproducible benchmark executable" ON)
 
 find_package(Threads REQUIRED)
 
@@ -28,6 +29,16 @@ if(NOT MSVC)
   target_compile_options(microfs_cli PRIVATE
     -Wall -Wextra -Wpedantic -Werror
   )
+endif()
+
+if(MICROFS_BUILD_BENCHMARKS)
+  add_executable(microfs_bench bench/microfs_bench.cc)
+  target_link_libraries(microfs_bench PRIVATE microfs::microfs)
+  if(NOT MSVC)
+    target_compile_options(microfs_bench PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+  endif()
 endif()
 
 if(MSVC)
