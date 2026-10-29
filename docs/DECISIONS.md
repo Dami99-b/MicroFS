@@ -71,3 +71,18 @@ unmeasured performance.
 - The database oracle test currently runs 10,000 randomized API operations.
   The one-million-operation target, randomized crash-point matrix, and
   concurrent snapshot/compaction stress remain outstanding.
+
+## Phase 5
+
+- TickStore keys reserve a five-byte namespace, followed by a zero-escaped
+  symbol and big-endian nanosecond timestamp. This keeps arbitrary user keys
+  in the same DB from being mistaken for tick records, while retaining
+  bytewise symbol/time order within the namespace.
+- Each AppendBatch stores one record: the key gives its first timestamp and
+  the value contains a varint count, zig-zag fixed-point price, varint size,
+  then timestamp and price deltas. Appends for a symbol must be strictly
+  increasing; out-of-order writes are rejected rather than rewriting earlier
+  batches.
+- Fuzz targets and CI workflows are provided for supported Clang/Linux
+  environments, but cannot be run with the Windows GCC toolchain available in
+  this session. Native sanitizer and POSIX results remain unverified.

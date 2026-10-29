@@ -13,6 +13,7 @@
 #include "microfs/skiplist.h"
 #include "microfs/status.h"
 #include "microfs/table.h"
+#include "microfs/tick_store.h"
 #include "microfs/version_set.h"
 #include "test_harness.h"
 #include "microfs/wal.h"
@@ -747,6 +748,52 @@ MICROFS_TEST(DatabaseAutomaticFlushAndCompaction) {
     }
     MICROFS_CHECK(db->Close().ok());
   }
+  std::filesystem::remove_all(path, error);
+}
+
+MICROFS_TEST(TickStoreBatchedEncodingAndRanges) {
+  auto env = microfs::NewDefaultEnv();
+  const std::string path = TempPath("tick-store");
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  auto opened = microfs::DB::Open(env.get(), path);
+  MICROFS_CHECK(opened.ok());
+  auto db = std::move(opened).value();
+  MICROFS_CHECK(db->Put("unrelated-user-key", "value").ok());
+  microfs::TickStore store(db.get());
+  const std::string binary_symbol("A\0B", 3);
+  std::vector<microfs::Tick> first_batch{
+      {binary_symbol, 100, -500, 7},
+      {binary_symbol, 105, -498, 12},
+      {binary_symbol, 120, -510, 3},
+  };
+  MICROFS_CHECK(store.AppendBatch(first_batch).ok());
+  MICROFS_CHECK(store.AppendTick({binary_symbol, 130, -509, 9}).ok());
+  MICROFS_CHECK(store.AppendBatch(
+                    {{"XYZ", 100, 1000000000, 100},
+                     {"XYZ", 200, 999999999, 120}})
+                    .ok());
+  auto range = store.QueryRange(binary_symbol, 104, 120);
+  MICROFS_CHECK(range.ok());
+  MICROFS_CHECK(range.value().size() == 2);
+  MICROFS_CHECK(range.value()[0].timestamp_ns == 105);
+  MICROFS_CHECK(range.value()[0].price == -498);
+  MICROFS_CHECK(range.value()[0].size == 12);
+  MICROFS_CHECK(range.value()[1].timestamp_ns == 120);
+  MICROFS_CHECK(range.value()[1].price == -510);
+  auto last = store.LastTick(binary_symbol);
+  MICROFS_CHECK(last.ok());
+  MICROFS_CHECK(last.value().timestamp_ns == 130);
+  MICROFS_CHECK(last.value().price == -509);
+  MICROFS_CHECK(store.AppendTick({binary_symbol, 130, 1, 1}).code() ==
+                microfs::StatusCode::kInvalidArgument);
+  MICROFS_CHECK(store.AppendBatch({{"XYZ", 300, 1, 1},
+                                  {"ABC", 301, 1, 1}})
+                    .code() == microfs::StatusCode::kInvalidArgument);
+  auto all = store.ScanAll(100, 200);
+  MICROFS_CHECK(all.ok());
+  MICROFS_CHECK(all.value().size() == 6);
+  MICROFS_CHECK(db->Close().ok());
   std::filesystem::remove_all(path, error);
 }
 
