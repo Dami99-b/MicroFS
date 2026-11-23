@@ -42,3 +42,21 @@ on another host or build as directly comparable without recording its
 environment and commit.
 
 ![Median random-write and random-hit-read throughput](img/microfs-bench.png)
+
+## Linux re-run after the read-path fix (2026-11-23)
+
+Same benchmark (`microfs_bench`, five measured repetitions, WAL sync `never`),
+Linux, GCC with the Makefile flags, 2 vCPUs. Medians:
+
+| Operations | Workload | ops/s | p99 latency |
+|---|---|---:|---:|
+| 10,000 | `fillrandom` | 77,110 | 31,359 ns |
+| 10,000 | `readrandom-hit` | 1,216,045 | 1,251 ns |
+| 100,000 | `fillrandom` | 77,640 | 31,167 ns |
+| 100,000 | `readrandom-hit` | 285,699 | 19,775 ns |
+
+At 100,000 operations part of the data lives in an SSTable. Before this fix,
+every lookup re-validated every entry of the index and data blocks and seeks
+scanned linearly, so that row was 16,952 ops/s at p99 128,511 ns. Blocks are now
+validated once (the index at table open, data blocks when first read from disk)
+and `Seek` binary-searches the restart array.
