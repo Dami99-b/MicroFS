@@ -18,6 +18,7 @@
 #include "test_harness.h"
 #include "microfs/wal.h"
 
+#include <initializer_list>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -60,7 +61,7 @@ MICROFS_TEST(FixedAndVariableCoding) {
                 0xfedcba9876543210ULL);
 
   for (const std::uint64_t input :
-       {0ULL, 1ULL, 127ULL, 128ULL, 16384ULL, UINT64_MAX}) {
+       std::initializer_list<std::uint64_t>{0ULL, 1ULL, 127ULL, 128ULL, 16384ULL, UINT64_MAX}) {
     encoded.clear();
     microfs::PutVarint64(&encoded, input);
     std::string_view view(encoded);

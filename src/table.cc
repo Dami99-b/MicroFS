@@ -394,6 +394,9 @@ Status Table::LoadDataBlock(
   std::string data;
   Status status = ReadBlock(handle, &data);
   if (!status.ok()) return status;
+  BlockReader validator;
+  status = validator.Open(data);
+  if (!status.ok()) return status;
   try {
     auto block = std::make_shared<const std::string>(std::move(data));
     if (cache_ != nullptr) {
@@ -421,7 +424,7 @@ Status Table::GetAtOrAfter(std::string_view key, std::string* found_key,
     return Status::InvalidArgument("null table lookup output");
   }
   BlockReader index;
-  Status status = index.Open(index_data_);
+  Status status = index.OpenValidated(index_data_);
   if (!status.ok()) return status;
   index.Seek(key);
   if (!index.status().ok()) return index.status();
@@ -434,7 +437,7 @@ Status Table::GetAtOrAfter(std::string_view key, std::string* found_key,
   status = LoadDataBlock(handle, &data);
   if (!status.ok()) return status;
   BlockReader block;
-  status = block.Open(*data);
+  status = block.OpenValidated(*data);
   if (!status.ok()) return status;
   block.Seek(key);
   if (!block.status().ok()) return block.status();
