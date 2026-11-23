@@ -92,6 +92,12 @@ std::size_t BlockBuilder::CurrentSizeEstimate() const {
 }
 
 Status BlockReader::Open(std::string_view bytes) {
+  Status status = OpenValidated(bytes);
+  if (!status.ok() || entries_end_ == 0) return status;
+  return ValidateEntries();
+}
+
+Status BlockReader::OpenValidated(std::string_view bytes) {
   SetInvalid();
   restart_offsets_.clear();
   if (bytes.size() < 8) return Status::Corruption("block is shorter than footer");
@@ -131,6 +137,11 @@ Status BlockReader::Open(std::string_view bytes) {
     status_ = Status::OK();
     return status_;
   }
+  status_ = Status::OK();
+  return status_;
+}
+
+Status BlockReader::ValidateEntries() {
   std::size_t cursor = 0;
   std::size_t restart_index = 0;
   std::string previous_key;
@@ -251,7 +262,45 @@ void BlockReader::SeekToLast() {
 }
 
 void BlockReader::Seek(std::string_view target) {
-  SeekToFirst();
+  if (!status_.ok() || entries_end_ == 0 || restart_offsets_.empty()) {
+    SetInvalid();
+    return;
+  }
+  // Restart entries store their full key, so binary search them for the last
+  // restart whose key is below the target, then scan at most one interval.
+  std::size_t left = 0;
+  std::size_t right = restart_offsets_.size() - 1;
+  while (left < right) {
+    const std::size_t mid = left + (right - left + 1) / 2;
+    std::size_t next = 0;
+    std::string key;
+    std::string_view value;
+    Status status = DecodeEntry(restart_offsets_[mid], {}, &next, &key, &value);
+    if (!status.ok()) {
+      status_ = status;
+      SetInvalid();
+      return;
+    }
+    if (LexicographicComparator()(key, target) < 0) {
+      left = mid;
+    } else {
+      right = mid - 1;
+    }
+  }
+  std::size_t next = 0;
+  std::string key;
+  std::string_view value;
+  Status status = DecodeEntry(restart_offsets_[left], {}, &next, &key, &value);
+  if (!status.ok()) {
+    status_ = status;
+    SetInvalid();
+    return;
+  }
+  entry_offset_ = restart_offsets_[left];
+  next_offset_ = next;
+  key_ = std::move(key);
+  value_ = value;
+  valid_ = true;
   while (valid_ && LexicographicComparator()(key_, target) < 0) Next();
 }
 

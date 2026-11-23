@@ -30,7 +30,10 @@ class BlockBuilder {
 
 class BlockReader {
  public:
+  // Parses and fully validates every entry. Use for untrusted bytes.
   Status Open(std::string_view bytes);
+  // Parses only the restart array. Use for bytes already validated by Open.
+  Status OpenValidated(std::string_view bytes);
 
   [[nodiscard]] bool Valid() const { return valid_; }
   [[nodiscard]] const Status& status() const { return status_; }
@@ -48,6 +51,7 @@ class BlockReader {
   void Prev();
 
  private:
+  Status ValidateEntries();
   Status DecodeEntry(std::size_t offset, std::string_view previous_key,
                      std::size_t* next_offset, std::string* key,
                      std::string_view* value) const;
